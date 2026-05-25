@@ -1,99 +1,173 @@
-<div align="center">   
-  
-# BEVFormer: a Cutting-edge Baseline for Camera-based Detection
-</div>
+# BEVFormer Active Learning Pipeline
 
+An end-to-end active learning pipeline built on top of [BEVFormer](https://github.com/fundamentalvision/BEVFormer) for camera-based 3D object detection in autonomous driving.
 
-https://user-images.githubusercontent.com/27915819/161392594-fc0082f7-5c37-4919-830a-2dd423c1d025.mp4
+The core idea: instead of training on a fixed dataset, this pipeline **identifies which scenes the model struggles with**, clusters them by failure mode, and selects the most informative samples for the next training round — closing the loop between evaluation and data curation.
 
-> **BEVFormer: Learning Bird's-Eye-View Representation from Multi-Camera Images via Spatiotemporal Transformers**, ECCV 2022
-> - [Paper in arXiv](http://arxiv.org/abs/2203.17270) | [Paper in Chinese](https://drive.google.com/file/d/1dKnD6gUHhBXZ8gT733cIU_A7dHEEzNTP/view?usp=sharing) |  [OpenDriveLab](https://opendrivelab.com/)
-> - [Slides in English](https://docs.google.com/presentation/d/1fTjuSKpj_-KRjUACr8o5TbKetAXlWrmpaorVvfCTZUA/edit?usp=sharing) | [Occupancy and BEV Perception Talk Slides](https://docs.google.com/presentation/d/1U7wVi2_zJxM-EMqLVqC4zJ12ItUgS7ZcsXp7zQ1fkvc/edit?usp=sharing)
-> -  [Blog in Chinese](https://www.zhihu.com/question/521842610/answer/2431585901) | [Video Talk](https://www.bilibili.com/video/BV12t4y1t7Lq?share_source=copy_web) and [Slides](https://docs.google.com/presentation/d/1NNeikhDPkgT14G1D_Ih7K3wbSN0DkvhO9wlAMx3CIcM/edit?usp=sharing) (in Chinese) 
-> - [BEV Perception Survey](https://arxiv.org/abs/2209.05324) (Accepted by PAMI) | [Github repo](https://github.com/OpenDriveLab/BEVPerception-Survey-Recipe)
+---
 
+## What This Project Does
 
+```
+Initial Training          Evaluation           Scene Selection
+─────────────────    ─────────────────    ─────────────────────────
+BEVFormer-tiny    →  Per-scene metrics  →  Cluster hard scenes       →
+nuScenes mini        (mAP, NDS, etc.)      by failure mode               │
+                                                                          │
+        ┌─────────────────────────────────────────────────────────────────┘
+        ↓
+New Data Config         Resume Training       Automated Orchestration
+─────────────────    ─────────────────    ─────────────────────────
+Subset + hard scenes →  Fine-tune from   →  Apache Airflow DAG
+added to training       latest checkpoint    runs all steps end-to-end
+```
 
-# News
-- [2022/6/16]: We added two BEVformer configurations, which require less GPU memory than the base version. Please pull this repo to obtain the latest codes.
-- [2022/6/13]: We release an initial version of BEVFormer. It achieves a baseline result of **51.7%** NDS on nuScenes.
-- [2022/5/23]: 🚀🚀Built on top of BEVFormer, **BEVFormer++**, gathering up all best practices in recent SOTAs and our unique modification,  ranks **1st** on [Waymo Open Datast 3D Camera-Only Detection Challenge](https://waymo.com/open/challenges/2022/3d-camera-only-detection/). We will present BEVFormer++ on CVPR 2022 Autonomous Driving [Workshop](https://cvpr2022.wad.vision/).
-- [2022/3/10]: 🚀BEVFormer achieve the SOTA on [nuScenes Detection Task](https://nuscenes.org/object-detection?externalData=all&mapData=all&modalities=Camera) with **56.9% NDS** (camera-only)!
-</br>
+---
 
+## Pipeline Stages
 
-# Abstract
-In this work, the authors present a new framework termed BEVFormer, which learns unified BEV representations with spatiotemporal transformers to support multiple autonomous driving perception tasks. In a nutshell, BEVFormer exploits both spatial and temporal information by interacting with spatial and temporal space through predefined grid-shaped BEV queries. To aggregate spatial information, the authors design a spatial cross-attention that each BEV query extracts the spatial features from the regions of interest across camera views. For temporal information, the authors propose a temporal self-attention to recurrently fuse the history BEV information.
-The proposed approach achieves the new state-of-the-art **56.9\%** in terms of NDS metric on the nuScenes test set, which is **9.0** points higher than previous best arts and on par with the performance of LiDAR-based baselines.
+### 1. Baseline Training
+Train BEVFormer-tiny on nuScenes mini to establish a performance baseline.
 
+### 2. Per-Scene Evaluation
+Run evaluation per scene (not just dataset-level) to compute granular metrics: per-class AP, distance errors, velocity estimation errors. Scenes are scored by how far each metric falls below the population median.
 
-# Methods
-![method](figs/arch.png "model arch")
+### 3. Hard Scene Analysis & Clustering
+Difficult scenes are analyzed and grouped by **failure mode** using feature-based clustering:
+- **Scene-level features**: weather tags, time-of-day, object density, speed distribution
+- **Error-level features**: missed detections vs. false positives, distance from ego, object category
+- Clustering via k-means / DBSCAN to identify distinct hard-scene categories (e.g., "crowded intersection at night", "fast-moving distant objects")
 
+### 4. Active Sample Selection
+Given the cluster assignments, select scenes that maximize coverage of underrepresented failure modes — avoiding redundant sampling of already-seen scenarios. Selection strategies implemented:
+- **Uncertainty-based**: scenes where prediction confidence is low
+- **Diversity-based**: coverage sampling across clusters
+- **Hybrid**: weighted combination of both
 
-# Getting Started
-- [Installation](docs/install.md) 
-- [Prepare Dataset](docs/prepare_dataset.md)
-- [Run and Eval](docs/getting_started.md)
+### 5. Data Config Generation & Resume Training
+Automatically generate a new mmdet3d-compatible data config that merges the original training split with the selected hard scenes, then resume training from the latest checkpoint.
 
-# Model Zoo
+### 6. Orchestration with Apache Airflow
+All five stages above are wired into an Airflow DAG. Each stage is a task; the pipeline can be triggered manually or on a schedule. Logs, metrics, and selected scene IDs are tracked at each step.
 
-| Backbone | Method | Lr Schd | NDS| mAP|memroy | Config | Download |
-| :---: | :---: | :---: | :---: | :---:|:---:| :---: | :---: |
-| R50 | BEVFormer-tiny_fp16 | 24ep | 35.9|25.7 | - |[config](projects/configs/bevformer_fp16/bevformer_tiny_fp16.py) |[model](https://github.com/zhiqi-li/storage/releases/download/v1.0/bevformer_tiny_fp16_epoch_24.pth)/[log](https://github.com/zhiqi-li/storage/releases/download/v1.0/bevformer_tiny_fp16_epoch_24.log) |
-| R50 | BEVFormer-tiny | 24ep | 35.4|25.2 | 6500M |[config](projects/configs/bevformer/bevformer_tiny.py) |[model](https://github.com/zhiqi-li/storage/releases/download/v1.0/bevformer_tiny_epoch_24.pth)/[log](https://github.com/zhiqi-li/storage/releases/download/v1.0/bevformer_tiny_epoch_24.log) |
-| [R101-DCN](https://github.com/zhiqi-li/storage/releases/download/v1.0/r101_dcn_fcos3d_pretrain.pth)  | BEVFormer-small | 24ep | 47.9|37.0 | 10500M |[config](projects/configs/bevformer/bevformer_small.py) |[model](https://github.com/zhiqi-li/storage/releases/download/v1.0/bevformer_small_epoch_24.pth)/[log](https://github.com/zhiqi-li/storage/releases/download/v1.0/bevformer_small_epoch_24.log) |
-| [R101-DCN](https://github.com/zhiqi-li/storage/releases/download/v1.0/r101_dcn_fcos3d_pretrain.pth)  | BEVFormer-base | 24ep | 51.7|41.6 |28500M |[config](projects/configs/bevformer/bevformer_base.py) | [model](https://github.com/zhiqi-li/storage/releases/download/v1.0/bevformer_r101_dcn_24ep.pth)/[log](https://github.com/zhiqi-li/storage/releases/download/v1.0/bevformer_r101_dcn_24ep.log) |
-| [R50](https://drive.google.com/file/d/1JTVcrFcOFdPp7rtZ6K__SfF0Np15vXL7/view?usp=sharing)  | BEVformerV2-t1-base | 24ep | 42.6 | 35.1 | 23952M |[config](projects/configs/bevformerv2/bevformerv2-r50-t1-base-24ep.py) | [model/log](https://drive.google.com/drive/folders/1nts_1XxAagCEN_Ub7W2f-507SiDdVS_u?usp=sharing) |
-| [R50](https://drive.google.com/file/d/1JTVcrFcOFdPp7rtZ6K__SfF0Np15vXL7/view?usp=sharing)  | BEVformerV2-t1-base | 48ep | 43.9 | 35.9 | 23952M |[config](projects/configs/bevformerv2/bevformerv2-r50-t1-base-48ep.py) | [model/log](https://drive.google.com/drive/folders/1nts_1XxAagCEN_Ub7W2f-507SiDdVS_u?usp=sharing) |
-| [R50](https://drive.google.com/file/d/1JTVcrFcOFdPp7rtZ6K__SfF0Np15vXL7/view?usp=sharing)  | BEVformerV2-t1 | 24ep | 45.3 | 38.1 | 37579M |[config](projects/configs/bevformerv2/bevformerv2-r50-t1-24ep.py) | [model/log](https://drive.google.com/drive/folders/1uVzQCJq6gYbRLhBde09yzEBeU5l1hAxk?usp=sharing) |
-| [R50](https://drive.google.com/file/d/1JTVcrFcOFdPp7rtZ6K__SfF0Np15vXL7/view?usp=sharing)  | BEVformerV2-t1 | 48ep | 46.5 | 39.5 | 37579M |[config](projects/configs/bevformerv2/bevformerv2-r50-t1-48ep.py) | [model/log](https://drive.google.com/drive/folders/1uVzQCJq6gYbRLhBde09yzEBeU5l1hAxk?usp=sharing) |
-| [R50](https://drive.google.com/file/d/1JTVcrFcOFdPp7rtZ6K__SfF0Np15vXL7/view?usp=sharing)  | BEVformerV2-t2 | 24ep | 51.8 | 42.0 | 38954M |[config](projects/configs/bevformerv2/bevformerv2-r50-t2-24ep.py) | [model/log](https://drive.google.com/drive/folders/1bSyuFWxfJSIidGV7bC8jx2NR7idRN9-s?usp=sharing) |
-| [R50](https://drive.google.com/file/d/1JTVcrFcOFdPp7rtZ6K__SfF0Np15vXL7/view?usp=sharing)  | BEVformerV2-t2 | 48ep | 52.6 | 43.1 | 38954M |[config](projects/configs/bevformerv2/bevformerv2-r50-t2-48ep.py) | [model/log](https://drive.google.com/drive/folders/1bSyuFWxfJSIidGV7bC8jx2NR7idRN9-s?usp=sharing) |
-| [R50](https://drive.google.com/file/d/1JTVcrFcOFdPp7rtZ6K__SfF0Np15vXL7/view?usp=sharing)  | BEVformerV2-t8 | 24ep | 55.3 | 46.0 | 40392M |[config](projects/configs/bevformerv2/bevformerv2-r50-t8-24ep.py) | [model/log](https://drive.google.com/drive/folders/1Ml_usx5BNx43CFH1Di2OTazuzSyAlBto?usp=sharing) |
+---
 
-The Baidu Driver Link for (BEVFormerV2 model and log)[https://pan.baidu.com/s/1ynzlAt1DQbH8NkqmisatTw?pwd=fdcv] is here.
+## Stack
 
-# Catalog
-- [ ] BEVFormerV2 HyperQuery
-- [ ] BEVFormerV2 Optimization, including memory, speed, inference.
-- [x] BEVFormerV2 Release
-- [ ] BEV Segmentation checkpoints
-- [ ] BEV Segmentation code
-- [x] 3D Detection checkpoints
-- [x] 3D Detection code
-- [x] Initialization
+| Component | Choice |
+|---|---|
+| Detection model | BEVFormer-tiny (R50 backbone) |
+| Dataset | nuScenes mini |
+| Training framework | mmdet3d / mmcv |
+| Clustering | scikit-learn (k-means, DBSCAN) |
+| Orchestration | Apache Airflow (local, Docker Compose) |
+| Experiment tracking | *(planned: MLflow or W&B)* |
 
+---
 
-# Bibtex
-If this work is helpful for your research, please consider citing the following BibTeX entry.
+## Results
+
+> Results will be updated as pipeline iterations complete.
+
+| Round | Training Data | NDS | mAP | Notes |
+|---|---|---|---|---|
+| 0 (baseline) | nuScenes mini train split | — | — | In progress |
+| 1 | Round 0 + selected hard scenes | — | — | Pending |
+
+---
+
+## Getting Started
+
+### Prerequisites
+- CUDA 11.x, Python 3.8+
+- Docker & Docker Compose (for Airflow)
+
+### Installation
+
+```bash
+git clone https://github.com/kkyeonji/bev-active-learning-pipeline.git
+cd bev-active-learning-pipeline
+pip install -r requirements.txt
+```
+
+See [docs/install.md](docs/install.md) for the full mmdet3d/mmcv environment setup.
+
+### Dataset
+
+Download the nuScenes mini split and run the data preparation script:
+
+```bash
+python tools/create_data.py nuscenes \
+    --root-path ./data/nuscenes \
+    --out-dir ./data/nuscenes \
+    --extra-tag nuscenes \
+    --version v1.0-mini
+```
+
+See [docs/prepare_dataset.md](docs/prepare_dataset.md) for details.
+
+### Baseline Training
+
+```bash
+python tools/train.py projects/configs/bevformer/bevformer_tiny.py
+```
+
+### Per-Scene Evaluation
+
+```bash
+python tools/test.py projects/configs/bevformer/bevformer_tiny.py \
+    <checkpoint.pth> \
+    --eval bbox \
+    --eval-options jsonfile_prefix=./results/round0
+```
+
+*(Active learning analysis scripts live in `active_learning/` — in progress)*
+
+### Run the Full Pipeline (Airflow)
+
+```bash
+cd airflow
+docker-compose up -d
+# Open http://localhost:8080, trigger the `bev_active_learning` DAG
+```
+
+---
+
+## Repository Structure
+
+```
+.
+├── projects/configs/bevformer/   # mmdet3d model configs
+├── tools/                        # train, test, data prep scripts
+├── active_learning/              # scene scoring, clustering, selection (WIP)
+│   ├── score_scenes.py
+│   ├── cluster_scenes.py
+│   └── select_scenes.py
+├── airflow/                      # DAG definitions and Docker Compose (WIP)
+│   ├── dags/bev_active_learning.py
+│   └── docker-compose.yml
+└── docs/
+```
+
+---
+
+## Motivation
+
+Large-scale annotation is expensive. Active learning helps answer: **which unlabeled (or under-trained) scenes are worth labeling next?** In practice, autonomous driving datasets contain a long tail of rare but safety-critical scenarios — heavy rain, dense pedestrians, unusual object orientations. A model trained without targeting these scenes will underperform on exactly the situations that matter most.
+
+This project demonstrates a practical, automated loop to surface and prioritize those scenarios using only the model's own evaluation signal — no human-in-the-loop required for the selection step.
+
+---
+
+## Acknowledgement
+
+Built on top of [BEVFormer](https://github.com/fundamentalvision/BEVFormer) (Li et al., ECCV 2022). The original model architecture and training code are from the BEVFormer authors.
 
 ```
 @article{li2022bevformer,
-  title={BEVFormer: Learning Bird’s-Eye-View Representation from Multi-Camera Images via Spatiotemporal Transformers},
-  author={Li, Zhiqi and Wang, Wenhai and Li, Hongyang and Xie, Enze and Sima, Chonghao and Lu, Tong and Qiao, Yu and Dai, Jifeng}
+  title={BEVFormer: Learning Bird's-Eye-View Representation from Multi-Camera Images via Spatiotemporal Transformers},
+  author={Li, Zhiqi and Wang, Wenhai and Li, Hongyang and Xie, Enze and Sima, Chonghao and Lu, Tong and Qiao, Yu and Dai, Jifeng},
   journal={arXiv preprint arXiv:2203.17270},
   year={2022}
 }
-@article{Yang2022BEVFormerVA,
-  title={BEVFormer v2: Adapting Modern Image Backbones to Bird's-Eye-View Recognition via Perspective Supervision},
-  author={Chenyu Yang and Yuntao Chen and Haofei Tian and Chenxin Tao and Xizhou Zhu and Zhaoxiang Zhang and Gao Huang and Hongyang Li and Y. Qiao and Lewei Lu and Jie Zhou and Jifeng Dai},
-  journal={ArXiv},
-  year={2022},
-}
 ```
-
-# Acknowledgement
-
-Many thanks to these excellent open source projects:
-- [dd3d](https://github.com/TRI-ML/dd3d) 
-- [detr3d](https://github.com/WangYueFt/detr3d) 
-- [mmdet3d](https://github.com/open-mmlab/mmdetection3d)
-
-
-### &#8627; Stargazers
-[![Stargazers repo roster for @nastyox/Repo-Roster](https://reporoster.com/stars/fundamentalvision/BEVFormer)](https://github.com/fundamentalvision/BEVFormer/stargazers)
-
-### &#8627; Forkers
-[![Forkers repo roster for @nastyox/Repo-Roster](https://reporoster.com/forks/fundamentalvision/BEVFormer)](https://github.com/fundamentalvision/BEVFormer/network/members)
-
